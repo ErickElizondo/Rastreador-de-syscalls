@@ -7,8 +7,16 @@ use std::mem;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::ptr;
+use std::io::{stdin, stdout, Read, Write};
 
 mod system_call_names;
+
+fn pause() {//Done by u/K900_ in reddit https://www.reddit.com/r/rust/comments/8tfyof/noob_question_pause/
+    let mut stdout = stdout();
+    stdout.write(b"Press Enter to continue...").unwrap();
+    stdout.flush().unwrap();
+    stdin().read(&mut [0]).unwrap();
+}
 
 fn traceme() -> std::io::Result<(())> {
     match ptrace::traceme() {
@@ -18,8 +26,8 @@ fn traceme() -> std::io::Result<(())> {
     }
 }
 
-pub fn get_regs(pid: nix::unistd::Pid) -> Result<user_regs_struct, nix::Error> {
-    unsafe {
+pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_regs_struct, nix::Error> {
+    unsafe {//Changed to fulfill the requierements of -v and -V
         let mut regs: user_regs_struct = mem::uninitialized();
 
         #[allow(deprecated)]
@@ -29,6 +37,22 @@ pub fn get_regs(pid: nix::unistd::Pid) -> Result<user_regs_struct, nix::Error> {
             PT_NULL as *mut c_void,
             &mut regs as *mut _ as *mut c_void,
         );
+
+        res.map(|_| regs);
+        let mut syscallName = system_call_names::SYSTEM_CALL_NAMES[(regs.orig_rax) as usize];
+        if (arg == "-V" && exit){
+            println!("{}", &syscallName);
+            pause();
+        }else if (arg == "-v" && exit){ //Data obtained from sys/user.h https://code.woboq.org/qt5/include/sys/user.h.html
+            println!("========================================");
+            println!("Nombre del syscall: {}", &syscallName);
+            println!("Contenido de algunos registros:");
+            println!("r15: {}", regs.r15);
+            println!("r14: {}", regs.r14);
+            println!("regs.orig_rax: {}", regs.orig_rax);
+            println!("rcx: {}", regs.rcx);
+            println!("rdi: {}", regs.rdi);
+        }
         res.map(|_| regs)
     }
 }
@@ -36,10 +60,14 @@ pub fn get_regs(pid: nix::unistd::Pid) -> Result<user_regs_struct, nix::Error> {
 fn main() {
     let argv: Vec<_> = std::env::args().collect();
     let mut cmd = Command::new(&argv[1]);
+    println!("{}",&argv[1]);
+    pause();
     for arg in argv {
         println!("{}", arg);
         cmd.arg(arg);
     }
+    
+    let option = "-V";
     //Hashmap to store the count call, can compare to strace for numbers!
     let mut map = HashMap::new();
 
@@ -66,13 +94,14 @@ fn main() {
 
     loop {
         //get the registers from the address where ptrace is stopped.
-        let regs = match get_regs(pid) {
+        let regs = match get_regs(pid, option, exit) {
             Ok(x) => x,
             Err(err) => {
                 eprintln!("End of ptrace {:?}", err);
                 break;
             }
         };
+        
         if exit {
             /// syscall number is stored inside orig_rax register. Transalte from number
             /// to syscall name using an array that stores all syscalls.  
@@ -96,7 +125,7 @@ fn main() {
         waitpid(pid, None);
         exit = !exit;
     }
-
+    println!("=======displaying all syscalls=======");
     for (syscall, &number) in map.iter() {
         println!("{}: {}", syscall, number);
     }
