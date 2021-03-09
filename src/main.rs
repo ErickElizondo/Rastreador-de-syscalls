@@ -8,10 +8,11 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::ptr;
 use std::io::{stdin, stdout, Read, Write};
+use std::time::Instant;
 
 mod system_call_names;
 
-fn pause() {//Done by u/K900_ in reddit https://www.reddit.com/r/rust/comments/8tfyof/noob_question_pause/
+fn pause() {//Done by user u/K900_ in reddit https://www.reddit.com/r/rust/comments/8tfyof/noob_question_pause/
     let mut stdout = stdout();
     stdout.write(b"Press Enter to continue...").unwrap();
     stdout.flush().unwrap();
@@ -29,6 +30,7 @@ fn traceme() -> std::io::Result<(())> {
 pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_regs_struct, nix::Error> {
     unsafe {//Changed to fulfill the requierements of -v and -V
         let mut regs: user_regs_struct = mem::uninitialized();
+        let start = Instant::now();
 
         #[allow(deprecated)]
         let res = ptrace::ptrace(
@@ -37,6 +39,7 @@ pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_reg
             PT_NULL as *mut c_void,
             &mut regs as *mut _ as *mut c_void,
         );
+        let elapsed = start.elapsed();
 
         res.map(|_| regs);
         let mut syscallName = system_call_names::SYSTEM_CALL_NAMES[(regs.orig_rax) as usize];
@@ -45,30 +48,28 @@ pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_reg
             pause();
         }else if (arg == "-v" && exit){ //Data obtained from sys/user.h https://code.woboq.org/qt5/include/sys/user.h.html
             println!("========================================");
-            println!("Nombre del syscall: {}", &syscallName);
-            println!("Contenido de algunos registros:");
+            println!("syscall name: {}", &syscallName);
+            println!("Register content (some of them):");
             println!("r15: {}", regs.r15);
             println!("r14: {}", regs.r14);
             println!("regs.orig_rax: {}", regs.orig_rax);
             println!("rcx: {}", regs.rcx);
             println!("rdi: {}", regs.rdi);
+            println!("Time_elapsed: {} ms", elapsed.as_secs_f64());
         }
         res.map(|_| regs)
     }
 }
 
-fn main() {
-    let argv: Vec<_> = std::env::args().collect();
+fn strace(option: &str, argv: &mut [std::string::String]){//Moved main function to an auxiliar one so I can iterate through the arguments
     let mut cmd = Command::new(&argv[1]);
-    println!("{}",&argv[1]);
-    pause();
     for arg in argv {
-        println!("{}", arg);
-        cmd.arg(arg);
+        if (arg == "-v" || arg == "-V"){
+            continue;            
+        }else{//I wanna add as arguments any value except -v or -V
+            cmd.arg(arg);
+        }
     }
-    
-    let option = "-V";
-    //Hashmap to store the count call, can compare to strace for numbers!
     let mut map = HashMap::new();
 
     //allow the child to be traced
@@ -129,4 +130,16 @@ fn main() {
     for (syscall, &number) in map.iter() {
         println!("{}: {}", syscall, number);
     }
+}
+
+fn main() {
+    let argv: Vec<std::string::String> = std::env::args().collect();
+    println!("{:?}", argv);
+    let mut newvec = argv.to_vec();//Since I can't pass a vector as a parameter on a loop, I had to copy that vector in a weird way
+    for arg in argv {
+        if (arg == "-v" || arg == "-V"){
+            strace(&arg, &mut newvec);
+            println!("==========================");
+        }
+    }    
 }
