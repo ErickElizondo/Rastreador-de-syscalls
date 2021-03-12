@@ -9,6 +9,7 @@ use std::process::Command;
 use std::ptr;
 use std::io::{stdin, stdout, Read, Write};
 use std::time::Instant;
+use multi_map::MultiMap;
 
 mod system_call_names;
 
@@ -27,7 +28,7 @@ fn traceme() -> std::io::Result<(())> {
     }
 }
 
-pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_regs_struct, nix::Error> {
+pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool, total_time: &mut [f64; 332]) -> Result<user_regs_struct, nix::Error> {
     unsafe {//Changed to fulfill the requierements of -v and -V
         let mut regs: user_regs_struct = mem::uninitialized();
         let start = Instant::now();
@@ -41,7 +42,7 @@ pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_reg
         );
         let elapsed = start.elapsed();
 
-        res.map(|_| regs);
+        //res.map(|_| regs);
         let mut syscallName = system_call_names::SYSTEM_CALL_NAMES[(regs.orig_rax) as usize];
         if (arg == "-V" && exit){
             println!("{}", &syscallName);
@@ -56,13 +57,15 @@ pub fn get_regs(pid: nix::unistd::Pid, arg: &str, exit: bool) -> Result<user_reg
             println!("rcx: {}", regs.rcx);
             println!("rdi: {}", regs.rdi);
             println!("Time_elapsed: {} ms", elapsed.as_secs_f64());
+            total_time[(regs.orig_rax) as usize]+= elapsed.as_secs_f64();
         }
         res.map(|_| regs)
     }
 }
 
-fn strace(option: &str, argv: &mut [std::string::String]){//Moved main function to an auxiliar one so I can iterate through the arguments
-    let mut cmd = Command::new(&argv[1]);
+fn strace(index: usize, option: &str, argv: &mut [std::string::String]){//Moved main function to an auxiliar one so I can iterate through the arguments
+    let mut cmd = Command::new(&argv[index]);
+    let mut total_time: [f64; 332] = [0.0; 332];
     for arg in argv {
         if (arg == "-v" || arg == "-V"){
             continue;            
@@ -70,7 +73,7 @@ fn strace(option: &str, argv: &mut [std::string::String]){//Moved main function 
             cmd.arg(arg);
         }
     }
-    let mut map = HashMap::new();
+    let mut map = MultiMap::new(); //It's from a crate, I needed to store regs.orig_rax value somewhere without iterating again
 
     //allow the child to be traced
     let output = cmd.before_exec(traceme);
@@ -95,7 +98,7 @@ fn strace(option: &str, argv: &mut [std::string::String]){//Moved main function 
 
     loop {
         //get the registers from the address where ptrace is stopped.
-        let regs = match get_regs(pid, option, exit) {
+        let regs = match get_regs(pid, option, exit, &mut total_time) {
             Ok(x) => x,
             Err(err) => {
                 eprintln!("End of ptrace {:?}", err);
@@ -109,8 +112,8 @@ fn strace(option: &str, argv: &mut [std::string::String]){//Moved main function 
             let mut syscallName = system_call_names::SYSTEM_CALL_NAMES[(regs.orig_rax) as usize];
 
             match map.get(&syscallName) {
-                Some(&number) => map.insert(syscallName, number + 1),
-                _ => map.insert(syscallName, 1),
+                Some(&number) => map.insert(syscallName, regs.orig_rax, number + 1),
+                _ => map.insert(syscallName, regs.orig_rax, 1),
             };
         }
 
@@ -126,20 +129,43 @@ fn strace(option: &str, argv: &mut [std::string::String]){//Moved main function 
         waitpid(pid, None);
         exit = !exit;
     }
-    println!("=======displaying all syscalls=======");
-    for (syscall, &number) in map.iter() {
-        println!("{}: {}", syscall, number);
+
+    let mut total:f64 = 0.0;
+    for index in 0..332{
+        total+= total_time[index];
     }
+
+    println!("");
+    println!("% time         |seconds          | System Calls & Number|");
+    println!("-----------------------------------------------------------------------------");
+
+    let mut number_syscalls: i32 = 0;
+    for (syscall, &number) in map.iter() {
+        number_syscalls+= number.1;
+        println!("{:.2}            {:.6}           {}: {}", ((total_time[(number.0) as usize]/total)*100.0), total_time[(number.0) as usize],syscall, number.1);
+    }
+
+    println!("------------------------------------------------------------------------------");
+    println!("100.00          {:.6}           Total System Calls: {}\n",total , number_syscalls);
+
 }
 
 fn main() {
     let argv: Vec<std::string::String> = std::env::args().collect();
     println!("{:?}", argv);
     let mut newvec = argv.to_vec();//Since I can't pass a vector as a parameter on a loop, I had to copy that vector in a weird way
-    for arg in argv {
-        if (arg == "-v" || arg == "-V"){
-            strace(&arg, &mut newvec);
-            println!("==========================");
+    let mut index = 1;
+    while true{
+        if &mut newvec[index] == "-v" || &mut newvec[index] == "-V"{
+            index +=1;            
+            continue;
+        }else{
+            break; //Apparently I can't send another string into the strace function, so I'll send the index instead
         }
-    }    
+    }
+    for arg in argv {
+        if arg == "-v" || arg == "-V"{
+            strace(index, &arg, &mut newvec);
+        }
+    }
 }
